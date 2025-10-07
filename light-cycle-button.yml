@@ -1,0 +1,118 @@
+blueprint:
+  name: Button Toggle with Circadian Dimming
+  description: Toggles a light or area ON with brightness adjusted by the time of day (max at noon, min at midnight) and OFF if already active.
+  domain: automation
+  input:
+    remote_device:
+      name: Remote Control Device
+      description: The device that triggers the action (e.g., your MQTT remote).
+      selector:
+        device:
+          integration: mqtt # Assuming your device is MQTT-based
+          multiple: false
+    
+    button_action:
+      name: Button Action
+      description: The specific action on the device that should trigger the toggle (e.g., '1_short_release', 'single_press', etc.).
+      selector:
+        text:
+    
+    target_lights:
+      name: Target Lights/Area
+      description: The light entity, light group, or area to be controlled.
+      selector:
+        target:
+          entity:
+            domain: light
+          area:
+    
+    check_light_state:
+      name: State Check Entity (Crucial for Toggling)
+      description: A single light entity to check the ON/OFF state of the group/area. Pick the main light in the group/area.
+      selector:
+        entity:
+          domain: light
+          multiple: false
+    
+    min_brightness:
+      name: Minimum Brightness (Percent)
+      description: Brightness percentage at midnight (00:00). Must be between 1 and 100.
+      default: 10
+      selector:
+        number:
+          min: 1
+          max: 100
+          mode: slider
+          unit_of_measurement: '%'
+          
+    max_brightness:
+      name: Maximum Brightness (Percent)
+      description: Brightness percentage at noon (12:00).
+      default: 100
+      selector:
+        number:
+          min: 1
+          max: 100
+          mode: slider
+          unit_of_measurement: '%'
+          
+mode: single
+max_exceeded: silent
+
+trigger:
+  - platform: device
+    device_id: !input 'remote_device'
+    domain: mqtt
+    type: action
+    subtype: !input 'button_action'
+
+condition: []
+
+action:
+  - choose:
+      # ----------------------------------------------------
+      # CHOICE 1: Turn OFF the light if the check entity is currently ON
+      # ----------------------------------------------------
+      - conditions:
+          - condition: state
+            entity_id: !input 'check_light_state'
+            state: 'on'
+        sequence:
+          - service: light.turn_off
+            target: !input 'target_lights'
+              
+    # ----------------------------------------------------
+    # DEFAULT: Turn ON the light if the light is currently OFF (using dynamic brightness)
+    # ----------------------------------------------------
+    default:
+      - service: light.turn_on
+        data:
+          brightness_pct: >
+            {# Grab the current time in hours (0.00 to 23.99) #}
+            {% set hour = now().hour + now().minute / 60 %}
+            
+            {# Retrieve user-defined min/max brightness #}
+            {% set min_pct = states(iif(is_number(iif(is_state_attr('input_number.min_brightness', 'value', 'NaN'), 'NaN', 'input_number.min_brightness')), 'input_number.min_brightness', 'NaN')) | float(10) %}
+            {% set max_pct = states(iif(is_number(iif(is_state_attr('input_number.max_brightness', 'value', 'NaN'), 'NaN', 'input_number.max_brightness')), 'input_number.max_brightness', 'NaN')) | float(100) %}
+            
+            {# To center the time around noon (12) and map 00:00/24:00 to the minimum, we use the absolute difference from 12. #}
+            {% set time_diff = (hour - 12) | abs %}
+            
+            {# Scale the time difference (0 to 12) to the brightness range (min_pct to max_pct) #}
+            {% set brightness_range = max_pct - min_pct %}
+            
+            {% set brightness = max_pct - (time_diff * (brightness_range / 12)) %}
+            
+            {# Ensure it stays within the 1-100 range and convert to integer #}
+            {{ brightness | round(0) | int(10) }}
+          
+          # Optional: Add dynamic color temperature (Warm at night, Cool during day)
+          color_temp_kelvin: >
+            {% set hour = now().hour %}
+            {% if hour >= 7 and hour < 19 %}
+              4000  {# Daytime (7 AM to 7 PM): Cooler white #}
+            {% else %}
+              2700  {# Nighttime (7 PM to 7 AM): Warmer white #}
+            {% endif %}
+
+        target: !input 'target_lights'
